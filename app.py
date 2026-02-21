@@ -2,7 +2,9 @@ import json
 import os
 import random
 import re
+import socket
 import smtplib
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -21,6 +23,9 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_IPV4_PATCH_LOCK = threading.Lock()
+_IPV4_PATCHED = False
 
 STATUS_FLOW = [
     {"key": "pending", "label": "Pending", "icon": "🧾"},
@@ -28,6 +33,30 @@ STATUS_FLOW = [
 ]
 
 load_dotenv(BASE_DIR / ".env")
+
+
+def enforce_outbound_ipv4() -> None:
+    global _IPV4_PATCHED
+    with _IPV4_PATCH_LOCK:
+        if _IPV4_PATCHED:
+            return
+
+        def ipv4_only_getaddrinfo(
+            host: Any,
+            port: Any,
+            family: int = 0,
+            socktype: int = 0,
+            proto: int = 0,
+            flags: int = 0,
+        ) -> Any:
+            target_family = socket.AF_INET if family in (0, socket.AF_UNSPEC) else family
+            return _ORIGINAL_GETADDRINFO(host, port, target_family, socktype, proto, flags)
+
+        socket.getaddrinfo = ipv4_only_getaddrinfo
+        _IPV4_PATCHED = True
+
+
+enforce_outbound_ipv4()
 
 
 @dataclass
@@ -153,6 +182,8 @@ def create_db_pool(config: AppConfig) -> MySQLConnectionPool:
         "database": config.db_name,
         "autocommit": False,
         "charset": "utf8mb4",
+        # Keep outbound DB networking on Python socket stack so IPv4 forcing applies.
+        "use_pure": True,
     }
 
     if config.db_ssl_required:
